@@ -9,7 +9,7 @@ from styles import STYLES
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Путь к файлу закона
-LAW_FILE_PATH = os.path.join("data", "1.St_1-35.5.FZ_ 53.rtf")
+LAW_FILE_PATH = os.path.join("data", "1.St_1-35.5.FZ_53.rtf")
 
 def get_model_info(model_name: str) -> dict:
     for m in GEMINI_MODELS:
