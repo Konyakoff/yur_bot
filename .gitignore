@@ -4,3 +4,4 @@ __pycache__/
 .aider*
 db/
 *.db
+venv/

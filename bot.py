@@ -110,11 +110,15 @@ async def handle_user_query(message: types.Message):
     
     try:
         # Шаг 1: Ищем статьи (выбранная модель)
-        top_articles, _, in_tokens_1, out_tokens_1 = await get_top_ids(question, SELECTED_MODEL)
+        top_articles, error_or_usage, in_tokens_1, out_tokens_1 = await get_top_ids(question, SELECTED_MODEL)
         
         if not top_articles:
-            err_text = "❌ Не удалось определить подходящие статьи для вашего запроса."
-            await status_msg.edit_text(err_text)
+            if isinstance(error_or_usage, str):
+                err_text = f"❌ Ошибка при поиске статей (сбой API или модель недоступна):\n{error_or_usage}"
+            else:
+                err_text = "❌ Модель не смогла найти подходящие статьи или вернула ответ в неверном формате.\n\n💡 *Совет:* Выбранная вами модель может быть недостаточно мощной для анализа такого объема юридического текста. Попробуйте выбрать более продвинутую модель (например, gemini-2.5-flash или gemini-3.1-pro-preview)."
+                
+            await status_msg.edit_text(err_text, parse_mode=ParseMode.MARKDOWN)
             log_message(message.from_user.id, message.from_user.username, "out", err_text)
             return
             
@@ -146,11 +150,11 @@ async def handle_user_query(message: types.Message):
         # Отправляем ответ (внутри функции есть логирование)
         await send_long_message(message, final_answer)
         
-        # Удаляем статус
-        try:
-            await status_msg.delete()
-        except:
-            pass
+        # Статус-сообщение (с найденными статьями) больше не удаляем, чтобы пользователь видел результаты первого шага
+        # try:
+        #     await status_msg.delete()
+        # except:
+        #     pass
         
     except Exception as e:
         err_msg = f"⚠️ Произошла ошибка при отправке ответа:\n{str(e)}"

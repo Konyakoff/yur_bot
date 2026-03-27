@@ -9,7 +9,7 @@ from styles import STYLES
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # Путь к файлу закона
-LAW_FILE_PATH = os.path.join("data", "1.St_1-35.5.FZ_53.rtf")
+LAW_FILE_PATH = os.path.join("data", "1.St_1-35.5.FZ_53.txt")
 
 def get_model_info(model_name: str) -> dict:
     for m in GEMINI_MODELS:
@@ -89,7 +89,8 @@ async def get_top_ids(question: str, selected_model: str) -> tuple:
             genai.delete_file(sample_file.name)
         except:
             pass
-        return [], None, 0, 0
+        # Возвращаем ошибку в виде строки
+        return [], str(e), 0, 0
 
 async def get_expert_analysis(question: str, top_articles: list, style: str = "telegram_yur") -> tuple:
     """Шаг 2: Собираем контекст и получаем экспертный ответ (всегда gemini-3.1-pro-preview)."""
