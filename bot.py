@@ -9,22 +9,32 @@ from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemo
 # Загружаем переменные окружения ДО импорта остальных модулей
 load_dotenv()
 
-from gemini_service import get_top_ids, get_expert_analysis
+from gemini_service import get_top_ids, get_expert_analysis, calculate_cost, get_model_info
 from database import init_db, log_message, get_db_path
+from data_loader import GEMINI_MODELS
 
 bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
 dp = Dispatcher()
 
-# Глобальные переменные для админа и стиля
+# Глобальные переменные
 ADMIN_ID = str(os.getenv("ADMIN_ID", ""))
-CURRENT_STYLE = "standart"
+CURRENT_STYLE = "telegram_yur"
+SELECTED_MODEL = "gemini-3.1-pro-preview"
 
-def get_admin_keyboard():
+def get_models_keyboard():
+    keyboard = []
+    # Создаем кнопки по 2 в ряд
+    row = []
+    for model in GEMINI_MODELS:
+        row.append(KeyboardButton(text=f"Модель: {model['model_name']}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+        
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Формат: standart"), KeyboardButton(text="Формат: telegram")],
-            [KeyboardButton(text="Dialogs")]
-        ],
+        keyboard=keyboard,
         resize_keyboard=True
     )
 
@@ -45,11 +55,9 @@ async def send_long_message(message: types.Message, text: str):
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
     log_message(message.from_user.id, message.from_user.username, "in", message.text)
-    is_admin = str(message.from_user.id) == ADMIN_ID
-    reply_markup = get_admin_keyboard() if is_admin else ReplyKeyboardRemove()
     
-    ans_text = "Здравствуйте! Я эксперт военно-врачебной комиссии.\nОпишите ваши симптомы или диагноз, и я проведу анализ по Расписанию болезней."
-    await message.answer(ans_text, reply_markup=reply_markup)
+    ans_text = "Здравствуйте! Я ИИ-юрист эксперт в области военного права.\nВыберите модель для анализа запроса, а затем задайте свой вопрос."
+    await message.answer(ans_text, reply_markup=get_models_keyboard())
     log_message(message.from_user.id, message.from_user.username, "out", ans_text)
 
 @dp.message(F.text == "Dialogs")
@@ -68,22 +76,25 @@ async def cmd_dialogs(message: types.Message):
         await message.answer(ans)
         log_message(message.from_user.id, message.from_user.username, "out", ans)
 
-@dp.message(F.text.startswith("Формат: "))
-async def change_format(message: types.Message):
+@dp.message(F.text.startswith("Модель: "))
+async def select_model(message: types.Message):
     log_message(message.from_user.id, message.from_user.username, "in", message.text)
-    global CURRENT_STYLE
+    global SELECTED_MODEL
     
-    # Проверка прав администратора
-    if str(message.from_user.id) != ADMIN_ID:
-        return # Если не админ, просто игнорируем
-        
-    new_style = message.text.replace("Формат: ", "").strip()
-    if new_style in ["standart", "telegram"]:
-        CURRENT_STYLE = new_style
-        ans = f"✅ Глобальный формат ответов изменен на: <b>{new_style}</b>\nТеперь бот будет отвечать всем пользователям в этом стиле."
+    model_name = message.text.replace("Модель: ", "").strip()
+    model_info = get_model_info(model_name)
+    
+    if model_info:
+        SELECTED_MODEL = model_name
+        ans = f"✅ Модель успешно применена: <b>{model_name}</b>\n\n"
+        ans += f"🔹 Макс. контекст на вход: {model_info['max_input_tokens']} токенов\n"
+        ans += f"🔹 Макс. контекст на выход: {model_info['max_output_tokens']} токенов\n"
+        ans += f"🔹 Цена 1 млн токенов (вход): ${model_info['price_per_1m_input']}\n"
+        ans += f"🔹 Цена 1 млн токенов (выход): ${model_info['price_per_1m_output']}\n\n"
+        ans += "Теперь вы можете задать свой юридический вопрос."
         await message.answer(ans, parse_mode=ParseMode.HTML)
     else:
-        ans = "❌ Неизвестный формат."
+        ans = "❌ Неизвестная модель."
         await message.answer(ans)
     
     log_message(message.from_user.id, message.from_user.username, "out", ans)
@@ -93,29 +104,47 @@ async def handle_user_query(message: types.Message):
     log_message(message.from_user.id, message.from_user.username, "in", message.text)
     question = message.text
     
-    status_text = "⏳ Анализирую диагноз и ищу подходящие статьи..."
+    status_text = f"⏳ Анализирую вопрос с помощью модели {SELECTED_MODEL} и ищу подходящие статьи..."
     status_msg = await message.answer(status_text)
     log_message(message.from_user.id, message.from_user.username, "out", status_text)
     
     try:
-        # Шаг 1: Ищем ID
-        top3_ids = await get_top_ids(question)
+        # Шаг 1: Ищем статьи (выбранная модель)
+        top_articles, _, in_tokens_1, out_tokens_1 = await get_top_ids(question, SELECTED_MODEL)
         
-        if not top3_ids:
+        if not top_articles:
             err_text = "❌ Не удалось определить подходящие статьи для вашего запроса."
             await status_msg.edit_text(err_text)
             log_message(message.from_user.id, message.from_user.username, "out", err_text)
             return
             
-        upd_status_text = f"✅ Найдены подходящие статьи: {', '.join(top3_ids)}.\n⏳ Формирую экспертное заключение (это займет 20-40 секунд)..."
-        await status_msg.edit_text(upd_status_text)
-        log_message(message.from_user.id, message.from_user.username, "out", upd_status_text)
+        # Формируем ответ по первому этапу
+        in_cost_1, out_cost_1 = calculate_cost(in_tokens_1, out_tokens_1, SELECTED_MODEL)
+        articles_list_str = "\n".join([f"Статья {a['number']} - {a['percent']}%" for a in top_articles])
         
-        # Шаг 2: Получаем финальный ответ
-        expert_answer = await get_expert_analysis(question, top3_ids, style=CURRENT_STYLE)
+        step1_text = f"✅ <b>Найденные статьи (ТОП-10):</b>\n{articles_list_str}\n\n"
+        step1_text += f"📊 <b>Статистика 1 этапа ({SELECTED_MODEL}):</b>\n"
+        step1_text += f"Входные токены: {in_tokens_1} (${in_cost_1:.6f})\n"
+        step1_text += f"Выходные токены: {out_tokens_1} (${out_cost_1:.6f})\n\n"
+        step1_text += "⏳ Формирую экспертное заключение (это займет немного времени)..."
+        
+        await status_msg.edit_text(step1_text, parse_mode=ParseMode.HTML)
+        log_message(message.from_user.id, message.from_user.username, "out", step1_text)
+        
+        # Шаг 2: Получаем финальный ответ (всегда gemini-3.1-pro-preview)
+        expert_answer, _, in_tokens_2, out_tokens_2 = await get_expert_analysis(question, top_articles, style=CURRENT_STYLE)
+        
+        # Формируем итоговую статистику для второго шага
+        in_cost_2, out_cost_2 = calculate_cost(in_tokens_2, out_tokens_2, "gemini-3.1-pro-preview")
+        
+        stat_text = f"\n\n---\n📊 <b>Статистика 2 этапа (gemini-3.1-pro-preview):</b>\n"
+        stat_text += f"Входные токены: {in_tokens_2} (${in_cost_2:.6f})\n"
+        stat_text += f"Выходные токены: {out_tokens_2} (${out_cost_2:.6f})\n"
+        
+        final_answer = expert_answer + stat_text
         
         # Отправляем ответ (внутри функции есть логирование)
-        await send_long_message(message, expert_answer)
+        await send_long_message(message, final_answer)
         
         # Удаляем статус
         try:

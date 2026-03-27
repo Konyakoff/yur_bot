@@ -1,0 +1,30 @@
+[
+  {
+    "model_name": "gemini-1.5-flash",
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 8192,
+    "price_per_1m_input": 0.075,
+    "price_per_1m_output": 0.30
+  },
+  {
+    "model_name": "gemini-1.5-pro",
+    "max_input_tokens": 2000000,
+    "max_output_tokens": 8192,
+    "price_per_1m_input": 1.25,
+    "price_per_1m_output": 3.75
+  },
+  {
+    "model_name": "gemini-2.0-flash",
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 8192,
+    "price_per_1m_input": 0.10,
+    "price_per_1m_output": 0.40
+  },
+  {
+    "model_name": "gemini-3.1-pro-preview",
+    "max_input_tokens": 2000000,
+    "max_output_tokens": 8192,
+    "price_per_1m_input": 1.25,
+    "price_per_1m_output": 3.75
+  }
+]
