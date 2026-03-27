@@ -12,7 +12,7 @@ def load_json_db() -> dict:
     только для родительских объектов (parent_id = null)
     для быстрого поиска O(1).
     """
-    path = os.path.join("data", "53-ФЗ All Articles.json")
+    path = os.path.join("data", "53_FZ_All_Articles.json")
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     
