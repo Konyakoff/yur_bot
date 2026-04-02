@@ -4,12 +4,12 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, FSInputFile
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, FSInputFile, BufferedInputFile
 
 # Загружаем переменные окружения ДО импорта остальных модулей
 load_dotenv()
 
-from gemini_service import get_top_ids, get_expert_analysis, calculate_cost, get_model_info
+from gemini_service import get_top_ids, get_expert_analysis, calculate_cost, get_model_info, prepare_expert_context
 from database import init_db, log_message, get_db_path
 from data_loader import GEMINI_MODELS
 
@@ -20,8 +20,9 @@ dp = Dispatcher()
 ADMIN_ID = str(os.getenv("ADMIN_ID", ""))
 CURRENT_STYLE = "telegram_yur"
 SELECTED_MODEL = "gemini-3.1-pro-preview"
+SEND_PROMPTS = False
 
-def get_models_keyboard():
+def get_models_keyboard(user_id=None):
     keyboard = []
     # Создаем кнопки по 2 в ряд
     row = []
@@ -32,6 +33,12 @@ def get_models_keyboard():
             row = []
     if row:
         keyboard.append(row)
+        
+    if str(user_id) == ADMIN_ID:
+        keyboard.append([
+            KeyboardButton(text="Получать prompt.txt (Вкл)"),
+            KeyboardButton(text="Получать prompt.txt (Выкл)")
+        ])
         
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
@@ -57,8 +64,30 @@ async def cmd_start(message: types.Message):
     log_message(message.from_user.id, message.from_user.username, "in", message.text)
     
     ans_text = "Здравствуйте! Я ИИ-юрист эксперт в области военного права.\nВыберите модель для анализа запроса, а затем задайте свой вопрос."
-    await message.answer(ans_text, reply_markup=get_models_keyboard())
+    await message.answer(ans_text, reply_markup=get_models_keyboard(message.from_user.id))
     log_message(message.from_user.id, message.from_user.username, "out", ans_text)
+
+@dp.message(F.text == "Получать prompt.txt (Вкл)")
+async def cmd_prompts_on(message: types.Message):
+    log_message(message.from_user.id, message.from_user.username, "in", message.text)
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    global SEND_PROMPTS
+    SEND_PROMPTS = True
+    ans = "✅ Отправка prompt.txt ВКЛЮЧЕНА."
+    await message.answer(ans, reply_markup=get_models_keyboard(message.from_user.id))
+    log_message(message.from_user.id, message.from_user.username, "out", ans)
+
+@dp.message(F.text == "Получать prompt.txt (Выкл)")
+async def cmd_prompts_off(message: types.Message):
+    log_message(message.from_user.id, message.from_user.username, "in", message.text)
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    global SEND_PROMPTS
+    SEND_PROMPTS = False
+    ans = "❌ Отправка prompt.txt ВЫКЛЮЧЕНА."
+    await message.answer(ans, reply_markup=get_models_keyboard(message.from_user.id))
+    log_message(message.from_user.id, message.from_user.username, "out", ans)
 
 @dp.message(F.text == "Dialogs")
 async def cmd_dialogs(message: types.Message):
@@ -110,7 +139,7 @@ async def handle_user_query(message: types.Message):
     
     try:
         # Шаг 1: Ищем статьи (выбранная модель)
-        top_articles, error_or_usage, in_tokens_1, out_tokens_1 = await get_top_ids(question, SELECTED_MODEL)
+        top_articles, error_or_usage, in_tokens_1, out_tokens_1, prompt_step1 = await get_top_ids(question, SELECTED_MODEL)
         
         if not top_articles:
             if isinstance(error_or_usage, str):
@@ -122,11 +151,17 @@ async def handle_user_query(message: types.Message):
             log_message(message.from_user.id, message.from_user.username, "out", err_text)
             return
             
+        # Подготавливаем контекст для 2-го шага и получаем использованные ID
+        combined_context, used_ids = prepare_expert_context(top_articles)
+        
         # Формируем ответ по первому этапу
         in_cost_1, out_cost_1 = calculate_cost(in_tokens_1, out_tokens_1, SELECTED_MODEL)
-        articles_list_str = "\n".join([f"Статья {a['number']} - {a['percent']}%" for a in top_articles])
+        articles_list_str = "\n".join([f"Статья/Пункт {a['item_number']} - {a['file_name']} - {a['percent']}%" for a in top_articles])
         
-        step1_text = f"✅ <b>Найденные статьи (ТОП-10):</b>\n{articles_list_str}\n\n"
+        used_ids_str = "\n".join([f"• {uid}" for uid in used_ids]) if used_ids else "Нет данных"
+        
+        step1_text = f"✅ <b>Найденные статьи (ТОП-15):</b>\n{articles_list_str}\n\n"
+        step1_text += f"🔍 <b>Взяты в работу (id объектов >= 70% или Топ-3):</b>\n{used_ids_str}\n\n"
         step1_text += f"📊 <b>Статистика 1 этапа ({SELECTED_MODEL}):</b>\n"
         step1_text += f"Входные токены: {in_tokens_1} (${in_cost_1:.6f})\n"
         step1_text += f"Выходные токены: {out_tokens_1} (${out_cost_1:.6f})\n\n"
@@ -136,7 +171,7 @@ async def handle_user_query(message: types.Message):
         log_message(message.from_user.id, message.from_user.username, "out", step1_text)
         
         # Шаг 2: Получаем финальный ответ (всегда gemini-3.1-pro-preview)
-        expert_answer, _, in_tokens_2, out_tokens_2 = await get_expert_analysis(question, top_articles, style=CURRENT_STYLE)
+        expert_answer, _, in_tokens_2, out_tokens_2, prompt_step2 = await get_expert_analysis(question, combined_context, style=CURRENT_STYLE)
         
         # Формируем итоговую статистику для второго шага
         in_cost_2, out_cost_2 = calculate_cost(in_tokens_2, out_tokens_2, "gemini-3.1-pro-preview")
@@ -149,6 +184,14 @@ async def handle_user_query(message: types.Message):
         
         # Отправляем ответ (внутри функции есть логирование)
         await send_long_message(message, final_answer)
+        
+        if SEND_PROMPTS and str(message.from_user.id) == ADMIN_ID:
+            if prompt_step1:
+                file1 = BufferedInputFile(prompt_step1.encode("utf-8"), filename="prompt_step1.txt")
+                await message.answer_document(file1)
+            if prompt_step2:
+                file2 = BufferedInputFile(prompt_step2.encode("utf-8"), filename="prompt_step2.txt")
+                await message.answer_document(file2)
         
         # Статус-сообщение (с найденными статьями) больше не удаляем, чтобы пользователь видел результаты первого шага
         # try:
