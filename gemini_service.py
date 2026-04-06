@@ -44,22 +44,34 @@ async def get_top_ids(question: str, selected_model: str) -> tuple:
     combined_vyzhimki = "\n".join(all_contexts)
     
     prompt = f"""
-Ты — юридический эксперт.
+Ты — врач и юрист, эксперт в области военного права.
 ЗАДАЧА:
-Изучи предоставленные короткие выжимки статей и пунктов нормативно-правовых актов (НПА).
-Выбери топ-15 статей/пунктов, которые с наибольшей вероятностью могут содержать ответ на поставленный вопрос.
+1. Изучи вопрос пользователя и определи его категорию:
+   - "medical" (если в вопросе есть упоминание или состояния здоровья, или диагноза, или жалоб, или травм, или физиологических характеристик, либо суть вопроса сводится к "Освободят ли от армии с моим здоровьем?", "Какая категория годности?", "Берут ли в армию с таким заболеванием?").
+   - "legal" (если вопрос чисто юридический: порядок призыва, отсрочки по учебе/работе, сроки, обжалование и т.д.).
+   - "mixed" (смешанный вопрос).
+2. Выбери топ-15 статей/пунктов из предоставленных выжимок нормативно-правовых актов, которые с наибольшей вероятностью могут содержать ответ.
+ВНИМАНИЕ: Если категория "medical" или "mixed", ты ОБЯЗАН включить в топ как минимум 3 наиболее релевантные статьи именно из документа "3.PP_565_RaspBolezney".
 
 Вопрос пользователя: "{question}"
 
-Выведи топ-15 в порядке убывания релевантности (от самой подходящей к менее подходящим) строго в виде JSON.
+Выведи ответ строго в виде JSON.
 Имя файла должно быть строго без ".txt" в конце. 
-Указывай четкий номер статьи или пункта из выжимки.
+Указывай четкий номер статьи или пункта из выжимки, а также (если есть) точное название раздела и подраздела, в которых находится этот пункт/статья.
+
+ВАЖНОЕ ПРАВИЛО ОФОРМЛЕНИЯ НОМЕРОВ (item_number):
+Номер должен содержать ТОЛЬКО цифры, точки и дефисы (например: "1", "2", "1.1", "1.2", "1-1", "1-2", "1.1-1", "1.1-2", "1.1.1").
+КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать слова "Статья", "Пункт", "ст.", "п.", а также добавлять пробелы или любые буквы. Возвращай исключительно сам номер.
 
 Ожидаемый формат JSON:
-[
-  {{"file_name": "4.PP_663_Pologenie_o_Prizyve", "item_number": "3.1", "percent": 95}},
-  {{"file_name": "1.St_1-35.5.FZ_53", "item_number": "24", "percent": 80}}
-]
+{{
+  "query_category": "medical",
+  "reasoning": "Вопрос содержит упоминание о состоянии здоровья, поэтому обязательно включаем статьи из Расписания болезней.",
+  "top_articles": [
+    {{"file_name": "3.PP_565_RaspBolezney", "section": "II. Расписание болезней", "subsection": "1. Инфекционные и паразитарные болезни", "item_number": "1", "percent": 95}},
+    {{"file_name": "1.St_1-35.5.FZ_53", "section": "Раздел I. ОБЩИЕ ПОЛОЖЕНИЯ", "subsection": "", "item_number": "24", "percent": 80}}
+  ]
+}}
 
 ВЫЖИМКИ:
 {combined_vyzhimki}
@@ -78,34 +90,62 @@ async def get_top_ids(question: str, selected_model: str) -> tuple:
         raw_response = re.sub(r'\s*```$', '', raw_response)
         data = json.loads(raw_response)
         
+        # Если модель вернула старый формат (просто список) вместо словаря
+        if isinstance(data, list):
+            articles_data = data
+            query_category = "unknown"
+        else:
+            articles_data = data.get("top_articles", [])
+            query_category = data.get("query_category", "unknown")
+        
         # Извлекаем данные
         top_articles = []
-        for item in data[:15]:
+        for item in articles_data[:15]:
             file_name = item.get("file_name", "").replace(".txt", "")
-            item_number = str(item.get("item_number", ""))
+            item_number_raw = str(item.get("item_number", ""))
+            
+            # Извлекаем только сам номер (убираем слова "Статья", "Пункт", пробелы)
+            # Например, из "Статья 42" получим "42", из "Пункт 5.1" -> "5.1", из "6.1-1" -> "6.1-1"
+            match = re.search(r'\d+(?:[.-]\d+)*', item_number_raw)
+            item_number = match.group(0) if match else item_number_raw
+            
+            section = str(item.get("section", "")).strip()
+            subsection = str(item.get("subsection", "")).strip()
             percent = item.get("percent", 0)
             
             if file_name and item_number:
                 top_articles.append({
                     "file_name": file_name,
+                    "section": section,
+                    "subsection": subsection,
                     "item_number": item_number,
                     "percent": percent
                 })
                 
+        # --- ФОРСИРОВАНИЕ РАСПИСАНИЯ БОЛЕЗНЕЙ В ТОП ---
+        if query_category in ["medical", "mixed"]:
+            rasp_articles = [a for a in top_articles if "3.PP_565_RaspBolezney" in a["file_name"]]
+            percents = [95, 94, 93]
+            for i, a in enumerate(rasp_articles[:3]):
+                a["percent"] = percents[i]
+            
+            # Сортируем заново, чтобы измененные статьи всплыли на самый верх
+            top_articles.sort(key=lambda x: x.get("percent", 0), reverse=True)
+                
         usage = response.usage_metadata
-        return top_articles, usage, usage.prompt_token_count, usage.candidates_token_count, prompt
+        return top_articles, query_category, usage, usage.prompt_token_count, usage.candidates_token_count, prompt
         
     except Exception as e:
         print(f"Error in get_top_ids: {e}")
         # Возвращаем ошибку в виде строки
-        return [], str(e), 0, 0, ""
+        return [], "unknown", str(e), 0, 0, ""
 
-def prepare_expert_context(top_articles: list) -> tuple:
+def prepare_expert_context(top_articles: list, threshold: int = 70) -> tuple:
     """Подготавливает контекст для второго шага и возвращает (combined_context, used_ids)."""
-    # Фильтруем статьи: берем только те, где вероятность >= 70%
-    filtered_articles = [art for art in top_articles if art.get("percent", 0) >= 70]
+    # Фильтруем статьи: берем только те, где вероятность >= threshold
+    filtered_articles = [art for art in top_articles if art.get("percent", 0) >= threshold]
     
-    # Если ни одна статья не достигла 70%, берем просто топ-3
+    # Если ни одна статья не достигла порога, берем просто топ-3
     if not filtered_articles:
         filtered_articles = top_articles[:3]
     
@@ -115,9 +155,11 @@ def prepare_expert_context(top_articles: list) -> tuple:
     for art in filtered_articles:
         file_name = art["file_name"]
         item_number = art["item_number"]
+        section = art.get("section", "")
+        subsection = art.get("subsection", "")
         
-        rag_data = find_rag_context(file_name, item_number)
-        if rag_data:
+        rag_data_list = find_rag_context(file_name, item_number, section, subsection)
+        for rag_data in rag_data_list:
             contexts.append(f"--- RAG Контекст ({file_name}, статья/пункт {item_number}) ---\n{rag_data['context']}")
             used_ids.append(rag_data['id'])
             

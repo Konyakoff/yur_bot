@@ -21,8 +21,13 @@ ADMIN_ID = str(os.getenv("ADMIN_ID", ""))
 CURRENT_STYLE = "telegram_yur"
 SELECTED_MODEL = "gemini-3.1-pro-preview"
 SEND_PROMPTS = False
+CONTEXT_THRESHOLD = 70
+WAITING_FOR_THRESHOLD = False
 
 def get_models_keyboard(user_id=None):
+    if str(user_id) != ADMIN_ID:
+        return ReplyKeyboardRemove()
+        
     keyboard = []
     # Создаем кнопки по 2 в ряд
     row = []
@@ -34,11 +39,24 @@ def get_models_keyboard(user_id=None):
     if row:
         keyboard.append(row)
         
-    if str(user_id) == ADMIN_ID:
-        keyboard.append([
-            KeyboardButton(text="Получать prompt.txt (Вкл)"),
-            KeyboardButton(text="Получать prompt.txt (Выкл)")
-        ])
+    from styles import STYLES
+    style_row = []
+    for style in STYLES.keys():
+        style_row.append(KeyboardButton(text=f"Стиль: {style}"))
+        if len(style_row) == 2:
+            keyboard.append(style_row)
+            style_row = []
+    if style_row:
+        keyboard.append(style_row)
+        
+    keyboard.append([
+        KeyboardButton(text="Получать prompt.txt (Вкл)"),
+        KeyboardButton(text="Получать prompt.txt (Выкл)")
+    ])
+    keyboard.append([
+        KeyboardButton(text="dialogs.db"),
+        KeyboardButton(text="Порог контекста %")
+    ])
         
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
@@ -63,7 +81,11 @@ async def send_long_message(message: types.Message, text: str):
 async def cmd_start(message: types.Message):
     log_message(message.from_user.id, message.from_user.username, "in", message.text)
     
-    ans_text = "Здравствуйте! Я ИИ-юрист эксперт в области военного права.\nВыберите модель для анализа запроса, а затем задайте свой вопрос."
+    if str(message.from_user.id) == ADMIN_ID:
+        ans_text = "Здравствуйте! Я ИИ-юрист эксперт в области военного права.\nВыберите модель для анализа запроса, а затем задайте свой вопрос."
+    else:
+        ans_text = "Здравствуйте! Я ИИ-юрист эксперт в области военного права.\nПожалуйста, задайте свой вопрос."
+        
     await message.answer(ans_text, reply_markup=get_models_keyboard(message.from_user.id))
     log_message(message.from_user.id, message.from_user.username, "out", ans_text)
 
@@ -89,7 +111,7 @@ async def cmd_prompts_off(message: types.Message):
     await message.answer(ans, reply_markup=get_models_keyboard(message.from_user.id))
     log_message(message.from_user.id, message.from_user.username, "out", ans)
 
-@dp.message(F.text == "Dialogs")
+@dp.message(F.text == "dialogs.db")
 async def cmd_dialogs(message: types.Message):
     log_message(message.from_user.id, message.from_user.username, "in", message.text)
     if str(message.from_user.id) != ADMIN_ID:
@@ -128,18 +150,92 @@ async def select_model(message: types.Message):
     
     log_message(message.from_user.id, message.from_user.username, "out", ans)
 
+@dp.message(F.text.startswith("Стиль: "))
+async def select_style(message: types.Message):
+    log_message(message.from_user.id, message.from_user.username, "in", message.text)
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    
+    global CURRENT_STYLE
+    style_name = message.text.replace("Стиль: ", "").strip()
+    
+    from styles import STYLES
+    if style_name in STYLES:
+        CURRENT_STYLE = style_name
+        ans = f"✅ Стиль успешно применен: <b>{style_name}</b>\n\nТеперь вы можете задать свой юридический вопрос."
+        await message.answer(ans, parse_mode=ParseMode.HTML)
+    else:
+        ans = "❌ Неизвестный стиль."
+        await message.answer(ans)
+    
+    log_message(message.from_user.id, message.from_user.username, "out", ans)
+
+@dp.message(F.text == "Порог контекста %")
+async def cmd_threshold(message: types.Message):
+    log_message(message.from_user.id, message.from_user.username, "in", message.text)
+    if str(message.from_user.id) != ADMIN_ID:
+        return
+    
+    global WAITING_FOR_THRESHOLD
+    WAITING_FOR_THRESHOLD = True
+    ans = "Введи число в % - две цифры, начиная с которых ИИ будет подтягивать нужные статьи/пункты к контексту."
+    await message.answer(ans)
+    log_message(message.from_user.id, message.from_user.username, "out", ans)
+
 @dp.message()
 async def handle_user_query(message: types.Message):
+    global WAITING_FOR_THRESHOLD, CONTEXT_THRESHOLD
     log_message(message.from_user.id, message.from_user.username, "in", message.text)
+    
+    is_admin = str(message.from_user.id) == ADMIN_ID
+    
+    if is_admin and WAITING_FOR_THRESHOLD:
+        try:
+            val = int(message.text.strip().replace('%', ''))
+            if 0 <= val <= 100:
+                CONTEXT_THRESHOLD = val
+                WAITING_FOR_THRESHOLD = False
+                ans = f"Новый порог в {val}% успешно установлен!"
+                await message.answer(ans)
+                log_message(message.from_user.id, message.from_user.username, "out", ans)
+                return
+            else:
+                ans = "Пожалуйста, введите корректное число от 0 до 100."
+                await message.answer(ans)
+                log_message(message.from_user.id, message.from_user.username, "out", ans)
+                return
+        except ValueError:
+            ans = "Пожалуйста, введите только число (например, 60)."
+            await message.answer(ans)
+            log_message(message.from_user.id, message.from_user.username, "out", ans)
+            return
+
     question = message.text
     
-    status_text = f"⏳ Анализирую вопрос с помощью модели {SELECTED_MODEL} и ищу подходящие статьи..."
+    if is_admin:
+        status_text = f"⏳ Анализирую вопрос с помощью модели {SELECTED_MODEL} и ищу подходящие статьи..."
+    else:
+        status_text = "Вопрос получен. Готовлю ответ..."
+        
     status_msg = await message.answer(status_text)
     log_message(message.from_user.id, message.from_user.username, "out", status_text)
     
+    typing_task = None
+    if not is_admin:
+        async def keep_typing():
+            while True:
+                try:
+                    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+                    await asyncio.sleep(4)
+                except asyncio.CancelledError:
+                    break
+                except:
+                    break
+        typing_task = asyncio.create_task(keep_typing())
+    
     try:
         # Шаг 1: Ищем статьи (выбранная модель)
-        top_articles, error_or_usage, in_tokens_1, out_tokens_1, prompt_step1 = await get_top_ids(question, SELECTED_MODEL)
+        top_articles, query_category, error_or_usage, in_tokens_1, out_tokens_1, prompt_step1 = await get_top_ids(question, SELECTED_MODEL)
         
         if not top_articles:
             if isinstance(error_or_usage, str):
@@ -152,23 +248,22 @@ async def handle_user_query(message: types.Message):
             return
             
         # Подготавливаем контекст для 2-го шага и получаем использованные ID
-        combined_context, used_ids = prepare_expert_context(top_articles)
+        combined_context, used_ids = prepare_expert_context(top_articles, threshold=CONTEXT_THRESHOLD)
         
         # Формируем ответ по первому этапу
         in_cost_1, out_cost_1 = calculate_cost(in_tokens_1, out_tokens_1, SELECTED_MODEL)
-        articles_list_str = "\n".join([f"Статья/Пункт {a['item_number']} - {a['file_name']} - {a['percent']}%" for a in top_articles])
         
-        used_ids_str = "\n".join([f"• {uid}" for uid in used_ids]) if used_ids else "Нет данных"
-        
-        step1_text = f"✅ <b>Найденные статьи (ТОП-15):</b>\n{articles_list_str}\n\n"
-        step1_text += f"🔍 <b>Взяты в работу (id объектов >= 70% или Топ-3):</b>\n{used_ids_str}\n\n"
-        step1_text += f"📊 <b>Статистика 1 этапа ({SELECTED_MODEL}):</b>\n"
-        step1_text += f"Входные токены: {in_tokens_1} (${in_cost_1:.6f})\n"
-        step1_text += f"Выходные токены: {out_tokens_1} (${out_cost_1:.6f})\n\n"
-        step1_text += "⏳ Формирую экспертное заключение (это займет немного времени)..."
-        
-        await status_msg.edit_text(step1_text, parse_mode=ParseMode.HTML)
-        log_message(message.from_user.id, message.from_user.username, "out", step1_text)
+        if is_admin:
+            articles_list_str = "\n".join([f"Статья/Пункт {a['item_number']} - {a['file_name']} - {a['percent']}%" for a in top_articles])
+            used_ids_str = "\n".join([f"• {uid}" for uid in used_ids]) if used_ids else "Нет данных"
+            
+            step1_text = f"🗂 <b>Классификация вопроса:</b> {query_category}\n\n"
+            step1_text += f"✅ <b>Найденные статьи (ТОП-15):</b>\n{articles_list_str}\n\n"
+            step1_text += f"🔍 <b>Взяты в работу (id объектов >= {CONTEXT_THRESHOLD}% или Топ-3):</b>\n{used_ids_str}\n\n"
+            step1_text += "⏳ Формирую экспертное заключение (это займет немного времени)..."
+            
+            await status_msg.edit_text(step1_text, parse_mode=ParseMode.HTML)
+            log_message(message.from_user.id, message.from_user.username, "out", step1_text)
         
         # Шаг 2: Получаем финальный ответ (всегда gemini-3.1-pro-preview)
         expert_answer, _, in_tokens_2, out_tokens_2, prompt_step2 = await get_expert_analysis(question, combined_context, style=CURRENT_STYLE)
@@ -176,16 +271,24 @@ async def handle_user_query(message: types.Message):
         # Формируем итоговую статистику для второго шага
         in_cost_2, out_cost_2 = calculate_cost(in_tokens_2, out_tokens_2, "gemini-3.1-pro-preview")
         
-        stat_text = f"\n\n---\n📊 <b>Статистика 2 этапа (gemini-3.1-pro-preview):</b>\n"
-        stat_text += f"Входные токены: {in_tokens_2} (${in_cost_2:.6f})\n"
-        stat_text += f"Выходные токены: {out_tokens_2} (${out_cost_2:.6f})\n"
+        total_cost = in_cost_1 + out_cost_1 + in_cost_2 + out_cost_2
+        
+        if is_admin:
+            stat_text = f"\n\n---\n*Статистика 1 этапа ({SELECTED_MODEL})*\n"
+            stat_text += f"Вход: {in_tokens_1} (${in_cost_1:.3f})\n"
+            stat_text += f"Выход: {out_tokens_1} (${out_cost_1:.3f})\n\n"
+            stat_text += f"*Статистика 2 этапа (gemini-3.1-pro-preview)*\n"
+            stat_text += f"Вход: {in_tokens_2} (${in_cost_2:.3f})\n"
+            stat_text += f"Выход: {out_tokens_2} (${out_cost_2:.3f})\n---"
+        else:
+            stat_text = f"\n\n---\nЦена ИИ-вычислений: ${total_cost:.3f}"
         
         final_answer = expert_answer + stat_text
         
         # Отправляем ответ (внутри функции есть логирование)
         await send_long_message(message, final_answer)
         
-        if SEND_PROMPTS and str(message.from_user.id) == ADMIN_ID:
+        if SEND_PROMPTS and is_admin:
             if prompt_step1:
                 file1 = BufferedInputFile(prompt_step1.encode("utf-8"), filename="prompt_step1.txt")
                 await message.answer_document(file1)
@@ -193,11 +296,12 @@ async def handle_user_query(message: types.Message):
                 file2 = BufferedInputFile(prompt_step2.encode("utf-8"), filename="prompt_step2.txt")
                 await message.answer_document(file2)
         
-        # Статус-сообщение (с найденными статьями) больше не удаляем, чтобы пользователь видел результаты первого шага
-        # try:
-        #     await status_msg.delete()
-        # except:
-        #     pass
+        # Удаляем промежуточное сообщение для обычных пользователей
+        if not is_admin:
+            try:
+                await status_msg.delete()
+            except:
+                pass
         
     except Exception as e:
         err_msg = f"⚠️ Произошла ошибка при отправке ответа:\n{str(e)}"
@@ -206,6 +310,9 @@ async def handle_user_query(message: types.Message):
         except:
             await message.answer(err_msg)
         log_message(message.from_user.id, message.from_user.username, "out", err_msg)
+    finally:
+        if typing_task:
+            typing_task.cancel()
 
 async def main():
     init_db()
